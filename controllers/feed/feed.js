@@ -6,6 +6,157 @@ const User = require("../../models/User");
 const { NotFoundError, BadRequestError } = require("../../errors");
 const jwt = require("jsonwebtoken");
 const Comment = require("../../models/Comment");
+const cloudinary = require("../../config/cloudinary");
+
+const GUEST_AUTHOR = {
+  _id: "tidzo",
+  username: "tidzo",
+  name: "Tidzo",
+  userImage: "",
+  isFollowing: false,
+};
+
+const CATEGORY_FOLDERS = {
+  // Cloudinary folder names are reversed from the lesson names.
+  alphabet: "numbers-counting",
+  numbers: "alphabet-learning",
+  "fruits-vegetables": "fruits-vegetables",
+  animals: "animals",
+  colors: "colors",
+  shapes: "shapes",
+  rhymes: "rhymes",
+};
+
+const listFolderVideos = async (folder) => {
+  const videos = [];
+  let nextCursor;
+
+  do {
+    const page = await cloudinary.api.resources_by_asset_folder(folder, {
+      resource_type: "video",
+      max_results: 100,
+      next_cursor: nextCursor,
+    });
+    videos.push(...(page.resources || []));
+    nextCursor = page.next_cursor;
+  } while (nextCursor);
+
+  return videos;
+};
+
+const listUploadedVideos = async (category) => {
+  const folders =
+    category && category !== "mix"
+      ? [CATEGORY_FOLDERS[category]].filter(Boolean)
+      : Object.values(CATEGORY_FOLDERS);
+  const groups = await Promise.all(folders.map(listFolderVideos));
+
+  return groups
+    .flat()
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+};
+
+// Letters come from the picture in each clip. Full-alphabet clips are "all".
+const ALPHABET_CLIPS = {
+  "cd627a2b-49ed-440a-981f-5d55466fd87c": { kind: "letter", letters: ["A"] },
+  "59243e46-b03a-4ef6-9307-c1400ee8a40e": { kind: "letter", letters: ["A"] },
+  "638935e2-188a-47b5-ae66-1b2a12f41af9": { kind: "letter", letters: ["B"] },
+  "8d214d42-5bbe-4e88-9af7-2e8916295a95": { kind: "letter", letters: ["C"] },
+  "1f7c5a48-3754-4461-8a46-ce88df898dbf": { kind: "letter", letters: ["C"] },
+  "fe7fc2b3-dbd0-4075-9da0-6cab4834a8ab": { kind: "letter", letters: ["D"] },
+  "738a4de9-fde5-4dfd-ab86-bce059ef8cd7": { kind: "letter", letters: ["D"] },
+  "417cb079-7c18-41b8-8301-e4a9bb7ba40a": { kind: "letter", letters: ["D"] },
+  "3c339328-2dcd-46ee-9e4a-64cb0ce2e486": { kind: "range", letters: ["A", "C"] },
+  "94d04791-3818-4753-af56-8773d1386816": { kind: "range", letters: ["A", "B", "D", "E"] },
+  "0ea31425-676e-4238-a4fe-7d5cb2766e01": { kind: "range", letters: ["A", "B", "C", "D", "E"] },
+  "28889fd2-84b7-45e9-b67f-33bc3b22ef01": { kind: "all" },
+  "45111036-a216-4d20-85dc-167242d3d439": { kind: "all" },
+  "e6ba13a5-4708-4f40-8d25-f9ec41cdf7ef": { kind: "all" },
+  "71a48a5d-68dd-4322-9351-8370f62f1455": { kind: "all" },
+  "9ab40570-170d-4993-aff1-e525660d595c": { kind: "all" },
+};
+
+const idsForLetter = (letter) => {
+  const entries = Object.entries(ALPHABET_CLIPS);
+  const dedicated = entries.filter(
+    ([, clip]) => clip.kind === "letter" && clip.letters[0] === letter,
+  );
+  if (dedicated.length) {
+    return new Set(dedicated.map(([id]) => id));
+  }
+  const ranged = entries.filter(
+    ([, clip]) => clip.kind === "range" && clip.letters.includes(letter),
+  );
+  if (ranged.length) {
+    return new Set(ranged.map(([id]) => id));
+  }
+  return new Set(
+    entries.filter(([, clip]) => clip.kind === "all").map(([id]) => id),
+  );
+};
+
+const clipMatchesAlphabet = (publicId, sub) => {
+  const choice = String(sub || "A-Z").toUpperCase();
+  if (choice === "A-Z" || choice === "ALL") {
+    return true;
+  }
+  const clip = ALPHABET_CLIPS[publicId];
+  if (!clip) {
+    return false;
+  }
+  if (choice === "A-E") {
+    if (clip.kind === "all") {
+      return false;
+    }
+    return clip.letters.every((letter) => letter >= "A" && letter <= "E");
+  }
+  if (/^[A-Z]$/.test(choice)) {
+    return idsForLetter(choice).has(publicId);
+  }
+  return true;
+};
+
+const mediaUrl = (publicId, options) =>
+  cloudinary.url(publicId, options).split("?")[0];
+
+const toGuestReel = (video) => ({
+  _id: video.public_id,
+  videoUri: video.secure_url,
+  thumbUri: mediaUrl(video.public_id, {
+    resource_type: "video",
+    format: "jpg",
+    secure: true,
+    transformation: [
+      {
+        start_offset: "auto",
+        width: 480,
+        height: 854,
+        crop: "fill",
+        quality: "auto",
+      },
+    ],
+  }),
+  caption: "",
+  createdAt: video.created_at,
+  user: GUEST_AUTHOR,
+  likesCount: 0,
+  commentsCount: 0,
+  isLiked: false,
+});
+
+const getGuestFeed = async (req, res) => {
+  const limit = Number.parseInt(req.query.limit, 10) || 50;
+  const offset = Number.parseInt(req.query.offset, 10) || 0;
+  let videos = await listUploadedVideos(req.query.category);
+  if (req.query.category === "alphabet" && req.query.sub) {
+    videos = videos.filter((video) =>
+      clipMatchesAlphabet(video.public_id, req.query.sub),
+    );
+  }
+  const reels = videos.slice(offset, offset + limit).map(toGuestReel);
+
+  res.status(StatusCodes.OK).json({ reels });
+};
 
 const getLikedVideos = async (req, res) => {
   const { limit = 10, offset = 0 } = req.query;
@@ -404,4 +555,5 @@ module.exports = {
   getAllHistoryReels,
   markReelsWatched,
   getHomeFeed,
+  getGuestFeed,
 };

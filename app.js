@@ -21,7 +21,9 @@ const feedRouter = require("./routes/feed");
 const user = require("./routes/user");
 const replyRouter = require("./routes/reply");
 const shareRouter = require("./routes/share");
+const { getGuestFeed } = require("./controllers/feed/feed");
 
+app.get("/feed/guest", getGuestFeed);
 app.use("/oauth", authRouter);
 app.use("/file", fileRouter);
 app.use("/share", shareRouter);
